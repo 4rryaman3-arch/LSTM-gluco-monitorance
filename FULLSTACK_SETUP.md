@@ -62,8 +62,14 @@ Example body:
 
 ```json
 {
-  "timestamp": "2026-02-27T20:30:00.000Z",
-  "current_glucose": 145,
+  "history_points": [
+    { "timestamp": "2026-02-27T20:00:00.000Z", "glucose": 168 },
+    { "timestamp": "2026-02-27T20:05:00.000Z", "glucose": 162 },
+    { "timestamp": "2026-02-27T20:10:00.000Z", "glucose": 157 },
+    { "timestamp": "2026-02-27T20:15:00.000Z", "glucose": 151 },
+    { "timestamp": "2026-02-27T20:20:00.000Z", "glucose": 147 },
+    { "timestamp": "2026-02-27T20:25:00.000Z", "glucose": 143 }
+  ],
   "horizon_hours": 6,
   "step_minutes": 5,
   "insulin_units": 2.0,
@@ -83,5 +89,8 @@ Send the same JSON payload. The server emits:
 
 ## Notes
 
+- Response includes:
+  - `recommended_insulin` (optimal units from model sweep)
+  - `with_insulin_events` and `without_insulin_events`
 - If no trajectory checkpoint exists at `MODEL_CHECKPOINT`, backend uses a heuristic fallback and marks it in `model.notes`.
 - You can plug your trained trajectory checkpoint into `MODEL_CHECKPOINT` without changing frontend code.

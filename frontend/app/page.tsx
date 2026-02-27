@@ -9,11 +9,17 @@ type ForecastPoint = {
   insulin_effect: number;
 };
 
+type ForecastEvent = {
+  timestamp: string;
+  event_type: "hypo_risk" | "hyper_risk" | "rapid_drop" | "rapid_rise";
+  severity: "low" | "medium" | "high";
+  message: string;
+};
+
 type ForecastPayload = {
   request_id: string;
   input: {
-    timestamp: string;
-    current_glucose: number;
+    history_points: { timestamp: string; glucose: number }[];
     horizon_hours: number;
     step_minutes: number;
     insulin_units: number | null;
@@ -21,6 +27,8 @@ type ForecastPayload = {
   };
   with_insulin: ForecastPoint[] | null;
   without_insulin: ForecastPoint[] | null;
+  with_insulin_events: ForecastEvent[];
+  without_insulin_events: ForecastEvent[];
   recommended_insulin: {
     units: number;
     expected_time_in_range_pct: number;
@@ -43,50 +51,63 @@ type WsTick = {
   without_insulin: ForecastPoint | null;
 };
 
+type HistoryRow = {
+  id: string;
+  timestampLocal: string;
+  glucose: number;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const WS_BASE =
   process.env.NEXT_PUBLIC_WS_BASE_URL ??
   API_BASE.replace("https://", "wss://").replace("http://", "ws://");
 
-function toSvgPath(values: number[], width: number, height: number): string {
-  if (values.length === 0) return "";
-  const min = Math.min(...values) - 10;
-  const max = Math.max(...values) + 10;
-  const range = Math.max(1, max - min);
-  return values
-    .map((value, idx) => {
-      const x = (idx / Math.max(1, values.length - 1)) * width;
-      const y = height - ((value - min) / range) * height;
-      return `${idx === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-    })
-    .join(" ");
+function formatLocalInput(date: Date): string {
+  const copy = new Date(date);
+  copy.setMinutes(copy.getMinutes() - copy.getTimezoneOffset());
+  return copy.toISOString().slice(0, 16);
 }
 
-function toSvgPathScaled(
+function buildDefaultSeries(): HistoryRow[] {
+  const now = new Date();
+  const values = [158, 153, 149, 145, 142, 140];
+  const rows: HistoryRow[] = [];
+  for (let i = 0; i < values.length; i += 1) {
+    const d = new Date(now.getTime() - (values.length - 1 - i) * 5 * 60 * 1000);
+    rows.push({
+      id: `h-${i}`,
+      timestampLocal: formatLocalInput(d),
+      glucose: values[i]
+    });
+  }
+  return rows;
+}
+
+function yFor(value: number, min: number, max: number, height: number): number {
+  const range = Math.max(1, max - min);
+  return height - ((value - min) / range) * height;
+}
+
+function buildPath(
   values: number[],
-  width: number,
+  startX: number,
+  span: number,
   height: number,
   min: number,
   max: number
 ): string {
-  if (values.length === 0) return "";
-  const range = Math.max(1, max - min);
+  if (values.length < 2) return "";
   return values
-    .map((value, idx) => {
-      const x = (idx / Math.max(1, values.length - 1)) * width;
-      const y = height - ((value - min) / range) * height;
+    .map((v, idx) => {
+      const x = startX + (idx / Math.max(1, values.length - 1)) * span;
+      const y = yFor(v, min, max, height);
       return `${idx === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
     .join(" ");
 }
 
 export default function Page() {
-  const now = new Date();
-  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-  const defaultTs = now.toISOString().slice(0, 16);
-
-  const [timestamp, setTimestamp] = useState(defaultTs);
-  const [currentGlucose, setCurrentGlucose] = useState(140);
+  const [historyRows, setHistoryRows] = useState<HistoryRow[]>(buildDefaultSeries());
   const [horizonHours, setHorizonHours] = useState(6);
   const [stepMinutes, setStepMinutes] = useState(5);
   const [useInsulin, setUseInsulin] = useState(true);
@@ -96,14 +117,34 @@ export default function Page() {
   const [result, setResult] = useState<ForecastPayload | null>(null);
   const [ticks, setTicks] = useState<WsTick[]>([]);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
 
-  const chartData = useMemo(() => {
-    return {
-      without: result?.without_insulin ?? [],
-      withInsulin: result?.with_insulin ?? []
-    };
-  }, [result]);
+  const sortedHistory = useMemo(
+    () =>
+      [...historyRows].sort(
+        (a, b) => new Date(a.timestampLocal).getTime() - new Date(b.timestampLocal).getTime()
+      ),
+    [historyRows]
+  );
+
+  const without = result?.without_insulin ?? [];
+  const withInsulin = result?.with_insulin ?? [];
+  const historyValues = sortedHistory.map((p) => p.glucose);
+  const withoutValues = without.map((p) => p.cgm);
+  const withValues = withInsulin.map((p) => p.cgm);
+  const allValues = [...historyValues, ...withoutValues, ...withValues];
+  const minY = allValues.length ? Math.min(...allValues) - 10 : 40;
+  const maxY = allValues.length ? Math.max(...allValues) + 10 : 220;
+
+  const chartWidth = 860;
+  const chartHeight = 330;
+  const historyWidth = 300;
+  const futureWidth = chartWidth - historyWidth;
+  const futureCount = Math.max(withoutValues.length, withValues.length);
+  const activeIndex = hoveredIndex === null ? null : Math.min(futureCount - 1, hoveredIndex);
+  const activeNo = activeIndex === null ? null : (without[activeIndex] ?? null);
+  const activeWith = activeIndex === null ? null : (withInsulin[activeIndex] ?? null);
 
   const connectSocketIfNeeded = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return wsRef.current;
@@ -113,21 +154,49 @@ export default function Page() {
     ws.onerror = () => setSocketState("error");
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
-      if (msg.event === "tick") {
-        setTicks((prev) => [...prev, msg as WsTick]);
-      }
+      if (msg.event === "tick") setTicks((prev) => [...prev, msg as WsTick]);
     };
     wsRef.current = ws;
     setSocketState("connecting");
     return ws;
   };
 
+  const addRow = () => {
+    const last = sortedHistory[sortedHistory.length - 1];
+    const lastDate = new Date(last.timestampLocal);
+    const nextDate = new Date(lastDate.getTime() + stepMinutes * 60 * 1000);
+    setHistoryRows((prev) => [
+      ...prev,
+      {
+        id: `h-${Date.now()}`,
+        timestampLocal: formatLocalInput(nextDate),
+        glucose: last.glucose
+      }
+    ]);
+  };
+
+  const removeRow = (id: string) => {
+    if (historyRows.length <= 3) return;
+    setHistoryRows((prev) => prev.filter((r) => r.id !== id));
+  };
+
+  const patchRow = (id: string, patch: Partial<HistoryRow>) => {
+    setHistoryRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  };
+
   const submit = async () => {
+    if (sortedHistory.length < 3) {
+      alert("Add at least 3 glucose points.");
+      return;
+    }
     setLoading(true);
     setTicks([]);
+
     const payload = {
-      timestamp: new Date(timestamp).toISOString(),
-      current_glucose: currentGlucose,
+      history_points: sortedHistory.map((p) => ({
+        timestamp: new Date(p.timestampLocal).toISOString(),
+        glucose: Number(p.glucose)
+      })),
       horizon_hours: horizonHours,
       step_minutes: stepMinutes,
       insulin_units: useInsulin ? insulinUnits : null,
@@ -140,9 +209,7 @@ export default function Page() {
         setSocketState("connected");
         ws.send(JSON.stringify(payload));
       };
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(payload));
-      }
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
 
       const response = await fetch(`${API_BASE}/api/v1/forecast`, {
         method: "POST",
@@ -150,42 +217,25 @@ export default function Page() {
         body: JSON.stringify(payload)
       });
       if (!response.ok) throw new Error(`Forecast failed (${response.status})`);
-      const data = (await response.json()) as ForecastPayload;
-      setResult(data);
+      setResult((await response.json()) as ForecastPayload);
     } catch (error) {
       console.error(error);
-      alert("Forecast failed. Check backend URL or payload.");
+      alert("Forecast failed. Check API health and request values.");
     } finally {
       setLoading(false);
     }
   };
 
-  const withoutValues = chartData.without.map((p) => p.cgm);
-  const withValues = chartData.withInsulin.map((p) => p.cgm);
-  const allValues = [...withoutValues, ...withValues];
-  const chartMin = allValues.length ? Math.min(...allValues) - 10 : 40;
-  const chartMax = allValues.length ? Math.max(...allValues) + 10 : 220;
-  const maxPoints = Math.max(withoutValues.length, withValues.length);
-  const activeIndex = hoveredIndex === null ? null : Math.min(maxPoints - 1, hoveredIndex);
-  const activeWithout = activeIndex === null ? null : (chartData.without[activeIndex] ?? null);
-  const activeWith = activeIndex === null ? null : (chartData.withInsulin[activeIndex] ?? null);
-  const width = 820;
-  const height = 320;
-
-  const yFromValue = (value: number) => {
-    const range = Math.max(1, chartMax - chartMin);
-    return height - ((value - chartMin) / range) * height;
-  };
-
-  const xFromIndex = (index: number, count: number) =>
-    (index / Math.max(1, count - 1)) * width;
-
   const onChartMouseMove = (event: React.MouseEvent<SVGSVGElement>) => {
-    if (maxPoints < 2) return;
+    if (futureCount < 2) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const ratio = Math.max(0, Math.min(1, x / rect.width));
-    const idx = Math.round(ratio * (maxPoints - 1));
+    const x = ((event.clientX - rect.left) / rect.width) * chartWidth;
+    if (x <= historyWidth) {
+      setHoveredIndex(null);
+      return;
+    }
+    const ratio = (x - historyWidth) / futureWidth;
+    const idx = Math.round(Math.max(0, Math.min(1, ratio)) * (futureCount - 1));
     setHoveredIndex(idx);
   };
 
@@ -193,10 +243,10 @@ export default function Page() {
     <main className="page">
       <section className="hero">
         <div>
-          <h1>Realtime Gluco Projection</h1>
+          <h1>Series-Based Glucose Forecast</h1>
           <p>
-            Choose time and current sugar level, then compare next-hour CGM trajectory with
-            and without insulin dosage from the backend forecast engine.
+            Enter a timestamped glucose series, then predict next events and optimal insulin dosage.
+            Hover the curve to inspect minute intervals.
           </p>
         </div>
         <div className="pill">WebSocket: {socketState}</div>
@@ -204,25 +254,50 @@ export default function Page() {
 
       <section className="grid">
         <article className="card">
-          <h2>Forecast Inputs</h2>
-          <div className="field">
-            <label>Timestamp</label>
-            <input
-              type="datetime-local"
-              value={timestamp}
-              onChange={(e) => setTimestamp(e.target.value)}
-            />
+          <h2>Input Series</h2>
+          <div className="series-head">
+            <button className="mini-btn" onClick={addRow}>
+              + Add Point
+            </button>
+            <span className="hint">Minimum 3 points required</span>
           </div>
-
-          <div className="field">
-            <label>Current Sugar (mg/dL)</label>
-            <input
-              type="number"
-              min={40}
-              max={500}
-              value={currentGlucose}
-              onChange={(e) => setCurrentGlucose(Number(e.target.value))}
-            />
+          <div className="series-table-wrap">
+            <table className="series-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Glucose</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {historyRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>
+                      <input
+                        type="datetime-local"
+                        value={row.timestampLocal}
+                        onChange={(e) => patchRow(row.id, { timestampLocal: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        min={40}
+                        max={500}
+                        value={row.glucose}
+                        onChange={(e) => patchRow(row.id, { glucose: Number(e.target.value) })}
+                      />
+                    </td>
+                    <td>
+                      <button className="danger-btn" onClick={() => removeRow(row.id)}>
+                        x
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
 
           <div className="row">
@@ -256,9 +331,8 @@ export default function Page() {
               checked={useInsulin}
               onChange={(e) => setUseInsulin(e.target.checked)}
             />
-            <label htmlFor="insulin">Include insulin dosage scenario</label>
+            <label htmlFor="insulin">Compare with insulin scenario</label>
           </div>
-
           {useInsulin && (
             <div className="field">
               <label>Insulin Units</label>
@@ -274,24 +348,17 @@ export default function Page() {
           )}
 
           <button className="btn" onClick={submit} disabled={loading}>
-            {loading ? "Forecasting..." : "Map Next Successive Hours"}
+            {loading ? "Running Forecast..." : "Predict Next Events + Dosage"}
           </button>
-          <p className="status">
-            {result
-              ? `Model: ${result.model.model_name} | Active: ${String(result.model.model_active)}`
-              : "No forecast yet"}
-          </p>
           {result && (
             <div className="reco">
               <p>
-                Optimal insulin (model sweep): <strong>{result.recommended_insulin.units} U</strong>
+                Recommended insulin: <strong>{result.recommended_insulin.units} U</strong>
               </p>
               <p>
-                Expected TIR: <strong>{result.recommended_insulin.expected_time_in_range_pct}%</strong> | Range:{" "}
-                <strong>
-                  {result.recommended_insulin.expected_min_cgm}-{result.recommended_insulin.expected_max_cgm} mg/dL
-                </strong>
+                Expected TIR: <strong>{result.recommended_insulin.expected_time_in_range_pct}%</strong>
               </p>
+              <p className="hint">{result.recommended_insulin.note}</p>
               <button
                 className="btn btn-secondary"
                 onClick={() => {
@@ -299,38 +366,50 @@ export default function Page() {
                   setInsulinUnits(result.recommended_insulin.units);
                 }}
               >
-                Use Recommended Dose
+                Apply Recommended Dose
               </button>
             </div>
           )}
         </article>
 
         <article className="card chart-shell">
-          <h2>Projected CGM Curve</h2>
+          <h2>History + Forecast Timeline</h2>
           <div className="legend">
             <span>
-              <span className="dot without" /> Without insulin
+              <span className="dot history" /> Input history
             </span>
             <span>
-              <span className="dot with" /> With insulin
+              <span className="dot without" /> Future (no insulin)
+            </span>
+            <span>
+              <span className="dot with" /> Future (with insulin)
             </span>
             <span className="hint">Realtime ticks: {ticks.length}</span>
           </div>
 
           <svg
-            viewBox={`0 0 ${width} ${height}`}
+            viewBox={`0 0 ${chartWidth} ${chartHeight}`}
             width="100%"
             height="360"
-            role="img"
             onMouseMove={onChartMouseMove}
             onMouseLeave={() => setHoveredIndex(null)}
           >
-            <rect x={0} y={0} width={width} height={height} fill="#f8fcfa" stroke="#d2e4de" />
-            <line x1={0} y1={height * 0.75} x2={width} y2={height * 0.75} stroke="#e9d1bf" />
-            <line x1={0} y1={height * 0.42} x2={width} y2={height * 0.42} stroke="#d2e4de" />
+            <rect x={0} y={0} width={chartWidth} height={chartHeight} fill="#f8fcfa" stroke="#d2e4de" />
+            <line x1={historyWidth} y1={0} x2={historyWidth} y2={chartHeight} stroke="#cad8d4" strokeDasharray="5 6" />
+            <line x1={0} y1={chartHeight * 0.74} x2={chartWidth} y2={chartHeight * 0.74} stroke="#ead4c4" />
+            <line x1={0} y1={chartHeight * 0.42} x2={chartWidth} y2={chartHeight * 0.42} stroke="#d8e5df" />
+
+            {historyValues.length > 1 && (
+              <path
+                d={buildPath(historyValues, 0, historyWidth, chartHeight, minY, maxY)}
+                fill="none"
+                stroke="#6d7f88"
+                strokeWidth={2.5}
+              />
+            )}
             {withoutValues.length > 1 && (
               <path
-                d={toSvgPathScaled(withoutValues, width, height, chartMin, chartMax)}
+                d={buildPath(withoutValues, historyWidth, futureWidth, chartHeight, minY, maxY)}
                 fill="none"
                 stroke="#1a9b8b"
                 strokeWidth={3}
@@ -338,7 +417,7 @@ export default function Page() {
             )}
             {withValues.length > 1 && (
               <path
-                d={toSvgPathScaled(withValues, width, height, chartMin, chartMax)}
+                d={buildPath(withValues, historyWidth, futureWidth, chartHeight, minY, maxY)}
                 fill="none"
                 stroke="#ef8d3c"
                 strokeWidth={3}
@@ -346,54 +425,59 @@ export default function Page() {
             )}
             {activeIndex !== null && (
               <line
-                x1={xFromIndex(activeIndex, maxPoints)}
+                x1={historyWidth + (activeIndex / Math.max(1, futureCount - 1)) * futureWidth}
                 y1={0}
-                x2={xFromIndex(activeIndex, maxPoints)}
-                y2={height}
-                stroke="#6a7c83"
+                x2={historyWidth + (activeIndex / Math.max(1, futureCount - 1)) * futureWidth}
+                y2={chartHeight}
+                stroke="#5d747e"
                 strokeDasharray="4 4"
               />
             )}
-            {activeWithout && (
-              <circle
-                cx={xFromIndex(activeIndex ?? 0, maxPoints)}
-                cy={yFromValue(activeWithout.cgm)}
-                r={4}
-                fill="#1a9b8b"
-              />
-            )}
-            {activeWith && (
-              <circle
-                cx={xFromIndex(activeIndex ?? 0, maxPoints)}
-                cy={yFromValue(activeWith.cgm)}
-                r={4}
-                fill="#ef8d3c"
-              />
-            )}
           </svg>
+
           {activeIndex !== null && (
             <div className="hovercard">
-              <strong>
-                Interval: T+{(activeIndex + 1) * stepMinutes} min
-              </strong>
+              <strong>Interval: T+{(activeIndex + 1) * stepMinutes} min</strong>
               <span>
-                Time: {new Date((activeWithout ?? activeWith)?.timestamp ?? timestamp).toLocaleString()}
+                Time: {new Date((activeNo ?? activeWith)?.timestamp ?? new Date().toISOString()).toLocaleString()}
               </span>
               <span>
-                No insulin: {activeWithout ? `${activeWithout.cgm} mg/dL` : "-"} | With insulin:{" "}
+                No insulin: {activeNo ? `${activeNo.cgm} mg/dL` : "-"} | With insulin:{" "}
                 {activeWith ? `${activeWith.cgm} mg/dL` : "-"}
               </span>
             </div>
           )}
 
-          <ul className="feed">
-            {ticks.slice(-8).map((tick) => (
-              <li key={`${tick.index}-${tick.without_insulin?.timestamp ?? "none"}`}>
-                Step {tick.index + 1}: no-insulin {tick.without_insulin?.cgm ?? "-"} | insulin{" "}
-                {tick.with_insulin?.cgm ?? "-"}
-              </li>
-            ))}
-          </ul>
+          <div className="event-grid">
+            <div className="event-card">
+              <h3>Events Without Insulin</h3>
+              <ul className="feed">
+                {result?.without_insulin_events.length ? (
+                  result.without_insulin_events.slice(0, 8).map((evt, i) => (
+                    <li key={`n-${i}`}>
+                      [{evt.severity}] {new Date(evt.timestamp).toLocaleTimeString()} - {evt.message}
+                    </li>
+                  ))
+                ) : (
+                  <li>No events detected.</li>
+                )}
+              </ul>
+            </div>
+            <div className="event-card">
+              <h3>Events With Insulin</h3>
+              <ul className="feed">
+                {result?.with_insulin_events.length ? (
+                  result.with_insulin_events.slice(0, 8).map((evt, i) => (
+                    <li key={`w-${i}`}>
+                      [{evt.severity}] {new Date(evt.timestamp).toLocaleTimeString()} - {evt.message}
+                    </li>
+                  ))
+                ) : (
+                  <li>No events detected.</li>
+                )}
+              </ul>
+            </div>
+          </div>
         </article>
       </section>
     </main>

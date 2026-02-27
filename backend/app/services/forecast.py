@@ -4,6 +4,7 @@ from datetime import timedelta
 from math import exp, pi, sin
 
 from app.schemas import (
+    ForecastEvent,
     ForecastPoint,
     ForecastRequest,
     ForecastResponse,
@@ -43,13 +44,23 @@ class ForecastEngine:
         insulin_units: float,
     ) -> list[ForecastPoint]:
         steps = (req.horizon_hours * 60) // req.step_minutes
-        current = float(req.current_glucose)
+        start_ts = req.history_points[-1].timestamp
+        history_values = [p.glucose for p in req.history_points]
+        current = float(history_values[-1])
         points: list[ForecastPoint] = []
-        history = [current] * max(self.model_adapter.seq_len, 8)
+        history = history_values[-max(self.model_adapter.seq_len, 8) :]
+        if len(history) < max(self.model_adapter.seq_len, 8):
+            history = [history[0]] * (max(self.model_adapter.seq_len, 8) - len(history)) + history
+
+        recent = history_values[-6:] if len(history_values) >= 6 else history_values
+        trend_per_step = 0.0
+        if len(recent) > 1:
+            diffs = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
+            trend_per_step = sum(diffs) / len(diffs)
 
         for idx in range(1, steps + 1):
             elapsed = idx * req.step_minutes
-            ts = req.timestamp + timedelta(minutes=elapsed)
+            ts = start_ts + timedelta(minutes=elapsed)
             minute_of_day = ts.hour * 60 + ts.minute
 
             circadian = 2.0 * sin((2 * pi * minute_of_day) / 1440.0)
@@ -61,7 +72,14 @@ class ForecastEngine:
                 minute_of_day=minute_of_day,
             )
 
-            next_cgm = current + homeostasis + (0.15 * circadian) + lstm_delta - insulin_drop
+            next_cgm = (
+                current
+                + homeostasis
+                + (0.15 * circadian)
+                + (0.25 * trend_per_step)
+                + lstm_delta
+                - insulin_drop
+            )
             next_cgm = float(min(400.0, max(40.0, next_cgm)))
             history.append(next_cgm)
             current = next_cgm
@@ -76,6 +94,59 @@ class ForecastEngine:
             )
 
         return points
+
+    @staticmethod
+    def _extract_events(points: list[ForecastPoint], step_minutes: int) -> list[ForecastEvent]:
+        events: list[ForecastEvent] = []
+        if len(points) < 2:
+            return events
+
+        for idx in range(1, len(points)):
+            prev = points[idx - 1]
+            cur = points[idx]
+            delta_per_min = (cur.cgm - prev.cgm) / max(1, step_minutes)
+
+            if cur.cgm <= 70:
+                sev = "high" if cur.cgm <= 54 else "medium"
+                events.append(
+                    ForecastEvent(
+                        timestamp=cur.timestamp,
+                        event_type="hypo_risk",
+                        severity=sev,
+                        message=f"Hypoglycemia risk at {cur.cgm:.1f} mg/dL",
+                    )
+                )
+            elif cur.cgm >= 180:
+                sev = "high" if cur.cgm >= 250 else "medium"
+                events.append(
+                    ForecastEvent(
+                        timestamp=cur.timestamp,
+                        event_type="hyper_risk",
+                        severity=sev,
+                        message=f"Hyperglycemia risk at {cur.cgm:.1f} mg/dL",
+                    )
+                )
+
+            if delta_per_min <= -1.8:
+                events.append(
+                    ForecastEvent(
+                        timestamp=cur.timestamp,
+                        event_type="rapid_drop",
+                        severity="medium" if delta_per_min > -2.5 else "high",
+                        message=f"Rapid glucose drop ({delta_per_min:.2f} mg/dL/min)",
+                    )
+                )
+            elif delta_per_min >= 1.8:
+                events.append(
+                    ForecastEvent(
+                        timestamp=cur.timestamp,
+                        event_type="rapid_rise",
+                        severity="medium" if delta_per_min < 2.5 else "high",
+                        message=f"Rapid glucose rise (+{delta_per_min:.2f} mg/dL/min)",
+                    )
+                )
+
+        return events[:20]
 
     @staticmethod
     def _score_series(points: list[ForecastPoint]) -> float:
@@ -144,6 +215,9 @@ class ForecastEngine:
         else:
             with_insulin = optimal_points
 
+        with_events = self._extract_events(with_insulin or [], req.step_minutes)
+        without_events = self._extract_events(without_insulin or [], req.step_minutes)
+
         model_info = ModelInfo(
             model_active=self.model_adapter.model_active,
             model_name=self.model_adapter.model_name,
@@ -155,6 +229,8 @@ class ForecastEngine:
             input=req,
             with_insulin=with_insulin,
             without_insulin=without_insulin,
+            with_insulin_events=with_events,
+            without_insulin_events=without_events,
             recommended_insulin=recommended,
             model=model_info,
         )
