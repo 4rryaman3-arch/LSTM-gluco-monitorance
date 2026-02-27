@@ -1,6 +1,16 @@
 .venv/
+node_modules/
+**/node_modules/
 **/__pycache__/
 **/.ipynb_checkpoints/
+frontend/node_modules/
+frontend/.next/
+backend/.venv/
+backend/__pycache__/
+backend/.pytest_cache/
+*.log
+backend/.env
+frontend/.env.local
 
 # local datasets and generated artifacts
 DiaData/datasets for T1D/
