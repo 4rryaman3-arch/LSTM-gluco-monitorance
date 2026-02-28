@@ -94,3 +94,41 @@ The code is organized as follows:
 - datasets for T1D.zip: Contains the integrated dataset. If restricted datasets are downloaded, they should be stored in this folder under datasets for T1D/granada or datasets for T1D/DiaTrend. The integrated dataset can be downloaded from https://www.kaggle.com/datasets/beyzacinar22/diadata,
 - data_intergation.py: Contains the functions to read and integrate the single datasets. If necessary, the paths to the datasets should be changed here. 
 - Data_Exploration.ipynb: Contains example code to read the required funtions. Provides statistical analysis of the dataset.
+
+## Running the LSTM Model
+
+Use the project virtual environment from the repository root:
+
+```powershell
+cd d:\personal_projects\college_project
+```
+
+Quick test on the sample dataset:
+
+```powershell
+.\.venv\Scripts\python.exe DiaData\lstm_polars.py --data-path "DiaData/datasets for T1D/maindatabase_sample.csv" --output-dir "DiaData/model_artifacts/lstm_polars_sample"
+```
+
+Low-memory run on the full CSV:
+
+```powershell
+.\.venv\Scripts\python.exe DiaData\lstm_polars.py --data-path "DiaData/datasets for T1D/maindatabase.csv" --output-dir "DiaData/model_artifacts/lstm_polars_full" --max-rows 800000 --patient-sample-frac 0.25 --max-sequences-per-split 20000 --seq-len 12 --horizon-steps 6 --epochs 3 --tune-trials 2
+```
+
+Stronger run after the low-memory test is stable:
+
+```powershell
+.\.venv\Scripts\python.exe DiaData\lstm_polars.py --data-path "DiaData/datasets for T1D/maindatabase.csv" --output-dir "DiaData/model_artifacts/lstm_polars_full" --max-rows 2000000 --patient-sample-frac 0.5 --max-sequences-per-split 120000 --seq-len 24 --horizon-steps 12 --epochs 8 --tune-trials 4
+```
+
+Outputs are saved under the selected output directory:
+
+- `model.pt`: trained model weights
+- `metrics.json`: validation and test metrics
+- `normalization.npz`: feature normalization values
+
+To see all available options:
+
+```powershell
+.\.venv\Scripts\python.exe DiaData\lstm_polars.py --help
+```
