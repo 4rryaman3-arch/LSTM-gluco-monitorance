@@ -1,0 +1,22 @@
+{
+  "name": "lstm-gluco-monitorance",
+  "private": true,
+  "version": "0.1.0",
+  "description": "FastAPI + Redis + Next.js stack for CGM forecasting with LSTM support.",
+  "packageManager": "pnpm@10.10.0",
+  "engines": {
+    "node": ">=24.0.0 <25.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "frontend:install": "pnpm --dir frontend install",
+    "frontend:dev": "pnpm --dir frontend dev",
+    "frontend:build": "pnpm --dir frontend build",
+    "frontend:start": "pnpm --dir frontend start",
+    "backend:dev": ".\\.venv\\Scripts\\python.exe -m uvicorn app.main:app --app-dir backend --reload --host 0.0.0.0 --port 8000",
+    "backend:test-health": ".\\.venv\\Scripts\\python.exe -c \"from fastapi.testclient import TestClient;from app.main import app;print(TestClient(app).get('/api/v1/health').json())\""
+  }
+}

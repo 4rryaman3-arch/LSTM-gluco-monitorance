@@ -1,0 +1,285 @@
+from __future__ import annotations
+
+from datetime import timedelta
+from math import exp, pi, sin
+
+from app.schemas import (
+    ForecastEvent,
+    ForecastPoint,
+    ForecastRequest,
+    ForecastResponse,
+    InsulinConsumptionSummary,
+    InsulinRecommendation,
+    ModelInfo,
+)
+from app.services.model_adapter import OptionalLSTMAdapter
+
+
+class ForecastEngine:
+    def __init__(self, model_adapter: OptionalLSTMAdapter) -> None:
+        self.model_adapter = model_adapter
+
+    @staticmethod
+    def _status(glucose: float) -> str:
+        if glucose <= 70:
+            return "hypo"
+        if glucose >= 180:
+            return "hyper"
+        return "euglycemia"
+
+    @staticmethod
+    def _dose_step_effect(units: float, minutes_since_dose: float, step_minutes: int) -> float:
+        if units <= 0 or minutes_since_dose < 0:
+            return 0.0
+        t_hours = minutes_since_dose / 60.0
+        if t_hours > 8:
+            return 0.0
+        # Simplified rapid-acting insulin action curve.
+        peak_hour = 1.3
+        width = 0.9
+        action = exp(-((t_hours - peak_hour) ** 2) / (2 * (width**2)))
+        # 35 mg/dL per unit total effect distributed over the curve.
+        return units * 35.0 * action * (step_minutes / 240.0)
+
+    @staticmethod
+    def _estimate_iob_units(req: ForecastRequest) -> float:
+        # Approximate insulin-on-board from history points over the last 4 hours.
+        start_ts = req.history_points[-1].timestamp
+        total = 0.0
+        for p in req.history_points:
+            age_min = (start_ts - p.timestamp).total_seconds() / 60.0
+            if age_min < 0:
+                continue
+            active_fraction = max(0.0, 1.0 - (age_min / 240.0))
+            total += p.insulin_consumed * active_fraction
+        return total
+
+    def _historical_insulin_effect(
+        self, req: ForecastRequest, elapsed_minutes: int, step_minutes: int
+    ) -> float:
+        start_ts = req.history_points[-1].timestamp
+        effect = 0.0
+        for p in req.history_points:
+            age_at_start = (start_ts - p.timestamp).total_seconds() / 60.0
+            minutes_since_dose = age_at_start + elapsed_minutes
+            effect += self._dose_step_effect(
+                p.insulin_consumed, minutes_since_dose, step_minutes
+            )
+        return effect
+
+    def _simulate_series(
+        self,
+        req: ForecastRequest,
+        insulin_units: float,
+    ) -> list[ForecastPoint]:
+        steps = (req.horizon_hours * 60) // req.step_minutes
+        start_ts = req.history_points[-1].timestamp
+        history_values = [p.glucose for p in req.history_points]
+        current = float(history_values[-1])
+        points: list[ForecastPoint] = []
+        history = history_values[-max(self.model_adapter.seq_len, 8) :]
+        if len(history) < max(self.model_adapter.seq_len, 8):
+            history = [history[0]] * (max(self.model_adapter.seq_len, 8) - len(history)) + history
+
+        recent = history_values[-6:] if len(history_values) >= 6 else history_values
+        trend_per_step = 0.0
+        if len(recent) > 1:
+            diffs = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
+            trend_per_step = sum(diffs) / len(diffs)
+
+        iob_units = self._estimate_iob_units(req)
+
+        for idx in range(1, steps + 1):
+            elapsed = idx * req.step_minutes
+            ts = start_ts + timedelta(minutes=elapsed)
+            minute_of_day = ts.hour * 60 + ts.minute
+
+            circadian = 2.0 * sin((2 * pi * minute_of_day) / 1440.0)
+            homeostasis = (110.0 - current) * 0.03
+            bolus_drop = self._dose_step_effect(insulin_units, elapsed, req.step_minutes)
+            history_drop = self._historical_insulin_effect(req, elapsed, req.step_minutes)
+            insulin_drop = bolus_drop + history_drop
+
+            insulin_signal = insulin_units + (iob_units * exp(-elapsed / 180.0))
+            lstm_delta = self.model_adapter.predict_delta(
+                history=history,
+                insulin_units=insulin_signal,
+                minute_of_day=minute_of_day,
+            )
+
+            next_cgm = (
+                current
+                + homeostasis
+                + (0.15 * circadian)
+                + (0.25 * trend_per_step)
+                + lstm_delta
+                - insulin_drop
+            )
+            next_cgm = float(min(400.0, max(40.0, next_cgm)))
+            history.append(next_cgm)
+            current = next_cgm
+
+            points.append(
+                ForecastPoint(
+                    timestamp=ts,
+                    cgm=round(next_cgm, 2),
+                    status=self._status(next_cgm),
+                    insulin_effect=round(insulin_drop, 3),
+                )
+            )
+
+        return points
+
+    @staticmethod
+    def _extract_events(points: list[ForecastPoint], step_minutes: int) -> list[ForecastEvent]:
+        events: list[ForecastEvent] = []
+        if len(points) < 2:
+            return events
+
+        for idx in range(1, len(points)):
+            prev = points[idx - 1]
+            cur = points[idx]
+            delta_per_min = (cur.cgm - prev.cgm) / max(1, step_minutes)
+
+            if cur.cgm <= 70:
+                sev = "high" if cur.cgm <= 54 else "medium"
+                events.append(
+                    ForecastEvent(
+                        timestamp=cur.timestamp,
+                        event_type="hypo_risk",
+                        severity=sev,
+                        message=f"Hypoglycemia risk at {cur.cgm:.1f} mg/dL",
+                    )
+                )
+            elif cur.cgm >= 180:
+                sev = "high" if cur.cgm >= 250 else "medium"
+                events.append(
+                    ForecastEvent(
+                        timestamp=cur.timestamp,
+                        event_type="hyper_risk",
+                        severity=sev,
+                        message=f"Hyperglycemia risk at {cur.cgm:.1f} mg/dL",
+                    )
+                )
+
+            if delta_per_min <= -1.8:
+                events.append(
+                    ForecastEvent(
+                        timestamp=cur.timestamp,
+                        event_type="rapid_drop",
+                        severity="medium" if delta_per_min > -2.5 else "high",
+                        message=f"Rapid glucose drop ({delta_per_min:.2f} mg/dL/min)",
+                    )
+                )
+            elif delta_per_min >= 1.8:
+                events.append(
+                    ForecastEvent(
+                        timestamp=cur.timestamp,
+                        event_type="rapid_rise",
+                        severity="medium" if delta_per_min < 2.5 else "high",
+                        message=f"Rapid glucose rise (+{delta_per_min:.2f} mg/dL/min)",
+                    )
+                )
+
+        return events[:20]
+
+    @staticmethod
+    def _score_series(points: list[ForecastPoint]) -> float:
+        if not points:
+            return float("inf")
+        cgms = [p.cgm for p in points]
+        n = len(cgms)
+        target = 110.0
+        mean_abs_error = sum(abs(v - target) for v in cgms) / n
+        hypo = sum(1 for v in cgms if v < 70)
+        severe_hypo = sum(1 for v in cgms if v < 54)
+        hyper = sum(1 for v in cgms if v > 180)
+        severe_hyper = sum(1 for v in cgms if v > 250)
+        in_range = sum(1 for v in cgms if 70 <= v <= 180)
+        tir_pct = (in_range / n) * 100.0
+
+        score = (
+            mean_abs_error
+            + 1.8 * hypo
+            + 3.0 * severe_hypo
+            + 1.0 * hyper
+            + 1.8 * severe_hyper
+            - 0.25 * tir_pct
+        )
+        return score
+
+    def _recommend_insulin(self, req: ForecastRequest) -> tuple[InsulinRecommendation, list[ForecastPoint]]:
+        best_units = 0.0
+        best_score = float("inf")
+        best_points: list[ForecastPoint] = []
+
+        # Search 0.0 - 10.0 U in 0.1 U increments.
+        for step in range(0, 101):
+            units = step / 10.0
+            points = self._simulate_series(req=req, insulin_units=units)
+            score = self._score_series(points)
+            if score < best_score:
+                best_score = score
+                best_units = units
+                best_points = points
+
+        cgms = [p.cgm for p in best_points] if best_points else [req.history_points[-1].glucose]
+        in_range = sum(1 for v in cgms if 70 <= v <= 180)
+        tir_pct = (in_range / max(1, len(cgms))) * 100.0
+
+        recommendation = InsulinRecommendation(
+            units=round(best_units, 1),
+            expected_time_in_range_pct=round(tir_pct, 2),
+            expected_min_cgm=round(min(cgms), 2),
+            expected_max_cgm=round(max(cgms), 2),
+            objective_score=round(best_score, 3),
+            note="Recommendation from model simulation sweep (0.0-10.0U) with historical insulin consumption.",
+        )
+        return recommendation, best_points
+
+    def forecast(self, req: ForecastRequest) -> ForecastResponse:
+        with_insulin = None
+        without_insulin = None
+        recommended, optimal_points = self._recommend_insulin(req)
+
+        if req.include_without_insulin:
+            without_insulin = self._simulate_series(req=req, insulin_units=0.0)
+
+        if req.insulin_units is not None and req.insulin_units > 0:
+            with_insulin = self._simulate_series(req=req, insulin_units=req.insulin_units)
+        else:
+            with_insulin = optimal_points
+
+        with_events = self._extract_events(with_insulin or [], req.step_minutes)
+        without_events = self._extract_events(without_insulin or [], req.step_minutes)
+
+        start_ts = req.history_points[-1].timestamp
+        total_units = sum(p.insulin_consumed for p in req.history_points)
+        recent_4h_units = sum(
+            p.insulin_consumed
+            for p in req.history_points
+            if (start_ts - p.timestamp).total_seconds() / 60.0 <= 240
+        )
+        insulin_summary = InsulinConsumptionSummary(
+            total_history_units=round(total_units, 2),
+            recent_4h_units=round(recent_4h_units, 2),
+            estimated_iob_units=round(self._estimate_iob_units(req), 2),
+        )
+
+        model_info = ModelInfo(
+            model_active=self.model_adapter.model_active,
+            model_name=self.model_adapter.model_name,
+            notes=self.model_adapter.notes,
+        )
+
+        return ForecastResponse(
+            request_id=req.request_id,
+            input=req,
+            with_insulin=with_insulin,
+            without_insulin=without_insulin,
+            with_insulin_events=with_events,
+            without_insulin_events=without_events,
+            recommended_insulin=recommended,
+            insulin_consumption_summary=insulin_summary,
+            model=model_info,
+        )
