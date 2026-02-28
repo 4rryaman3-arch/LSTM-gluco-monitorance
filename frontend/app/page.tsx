@@ -67,6 +67,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
 const WS_BASE =
   process.env.NEXT_PUBLIC_WS_BASE_URL ??
   API_BASE.replace("https://", "wss://").replace("http://", "ws://");
+const ENTRY_INTERVAL_MINUTES = 30;
 
 function formatLocalInput(date: Date): string {
   const copy = new Date(date);
@@ -172,7 +173,7 @@ export default function Page() {
   const addRow = () => {
     const last = sortedHistory[sortedHistory.length - 1];
     const lastDate = new Date(last.timestampLocal);
-    const nextDate = new Date(lastDate.getTime() + stepMinutes * 60 * 1000);
+    const nextDate = new Date(lastDate.getTime() + ENTRY_INTERVAL_MINUTES * 60 * 1000);
     setHistoryRows((prev) => [
       ...prev,
       {
@@ -269,7 +270,9 @@ export default function Page() {
             <button className="mini-btn" onClick={addRow}>
               + Add Point
             </button>
-            <span className="hint">Minimum 3 points required</span>
+            <span className="hint">
+              Minimum 3 points required | new rows add at {ENTRY_INTERVAL_MINUTES}-minute intervals
+            </span>
           </div>
           <div className="series-table-wrap">
             <table className="series-table">
