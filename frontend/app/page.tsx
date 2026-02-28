@@ -19,7 +19,7 @@ type ForecastEvent = {
 type ForecastPayload = {
   request_id: string;
   input: {
-    history_points: { timestamp: string; glucose: number }[];
+    history_points: { timestamp: string; glucose: number; insulin_consumed: number }[];
     horizon_hours: number;
     step_minutes: number;
     insulin_units: number | null;
@@ -36,6 +36,11 @@ type ForecastPayload = {
     expected_max_cgm: number;
     objective_score: number;
     note: string;
+  };
+  insulin_consumption_summary: {
+    total_history_units: number;
+    recent_4h_units: number;
+    estimated_iob_units: number;
   };
   model: {
     model_active: boolean;
@@ -55,6 +60,7 @@ type HistoryRow = {
   id: string;
   timestampLocal: string;
   glucose: number;
+  insulinConsumed: number;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -71,13 +77,15 @@ function formatLocalInput(date: Date): string {
 function buildDefaultSeries(): HistoryRow[] {
   const now = new Date();
   const values = [158, 153, 149, 145, 142, 140];
+  const insulin = [0, 0, 0.8, 0, 0, 0];
   const rows: HistoryRow[] = [];
   for (let i = 0; i < values.length; i += 1) {
     const d = new Date(now.getTime() - (values.length - 1 - i) * 5 * 60 * 1000);
     rows.push({
       id: `h-${i}`,
       timestampLocal: formatLocalInput(d),
-      glucose: values[i]
+      glucose: values[i],
+      insulinConsumed: insulin[i]
     });
   }
   return rows;
@@ -137,9 +145,9 @@ export default function Page() {
   const minY = allValues.length ? Math.min(...allValues) - 10 : 40;
   const maxY = allValues.length ? Math.max(...allValues) + 10 : 220;
 
-  const chartWidth = 860;
-  const chartHeight = 330;
-  const historyWidth = 300;
+  const chartWidth = 980;
+  const chartHeight = 390;
+  const historyWidth = 360;
   const futureWidth = chartWidth - historyWidth;
   const futureCount = Math.max(withoutValues.length, withValues.length);
   const activeIndex = hoveredIndex === null ? null : Math.min(futureCount - 1, hoveredIndex);
@@ -170,7 +178,8 @@ export default function Page() {
       {
         id: `h-${Date.now()}`,
         timestampLocal: formatLocalInput(nextDate),
-        glucose: last.glucose
+        glucose: last.glucose,
+        insulinConsumed: 0
       }
     ]);
   };
@@ -195,7 +204,8 @@ export default function Page() {
     const payload = {
       history_points: sortedHistory.map((p) => ({
         timestamp: new Date(p.timestampLocal).toISOString(),
-        glucose: Number(p.glucose)
+        glucose: Number(p.glucose),
+        insulin_consumed: Number(p.insulinConsumed)
       })),
       horizon_hours: horizonHours,
       step_minutes: stepMinutes,
@@ -267,6 +277,7 @@ export default function Page() {
                 <tr>
                   <th>Time</th>
                   <th>Glucose</th>
+                  <th>Insulin</th>
                   <th />
                 </tr>
               </thead>
@@ -287,6 +298,18 @@ export default function Page() {
                         max={500}
                         value={row.glucose}
                         onChange={(e) => patchRow(row.id, { glucose: Number(e.target.value) })}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        max={50}
+                        step={0.1}
+                        value={row.insulinConsumed}
+                        onChange={(e) =>
+                          patchRow(row.id, { insulinConsumed: Number(e.target.value) })
+                        }
                       />
                     </td>
                     <td>
@@ -359,6 +382,12 @@ export default function Page() {
                 Expected TIR: <strong>{result.recommended_insulin.expected_time_in_range_pct}%</strong>
               </p>
               <p className="hint">{result.recommended_insulin.note}</p>
+              <p>
+                History insulin:{" "}
+                <strong>{result.insulin_consumption_summary.total_history_units} U</strong> | Last 4h:{" "}
+                <strong>{result.insulin_consumption_summary.recent_4h_units} U</strong> | IOB:{" "}
+                <strong>{result.insulin_consumption_summary.estimated_iob_units} U</strong>
+              </p>
               <button
                 className="btn btn-secondary"
                 onClick={() => {
@@ -390,7 +419,7 @@ export default function Page() {
           <svg
             viewBox={`0 0 ${chartWidth} ${chartHeight}`}
             width="100%"
-            height="360"
+            height="430"
             onMouseMove={onChartMouseMove}
             onMouseLeave={() => setHoveredIndex(null)}
           >

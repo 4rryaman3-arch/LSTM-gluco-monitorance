@@ -63,12 +63,12 @@ Example body:
 ```json
 {
   "history_points": [
-    { "timestamp": "2026-02-27T20:00:00.000Z", "glucose": 168 },
-    { "timestamp": "2026-02-27T20:05:00.000Z", "glucose": 162 },
-    { "timestamp": "2026-02-27T20:10:00.000Z", "glucose": 157 },
-    { "timestamp": "2026-02-27T20:15:00.000Z", "glucose": 151 },
-    { "timestamp": "2026-02-27T20:20:00.000Z", "glucose": 147 },
-    { "timestamp": "2026-02-27T20:25:00.000Z", "glucose": 143 }
+    { "timestamp": "2026-02-27T20:00:00.000Z", "glucose": 168, "insulin_consumed": 0.0 },
+    { "timestamp": "2026-02-27T20:05:00.000Z", "glucose": 162, "insulin_consumed": 0.0 },
+    { "timestamp": "2026-02-27T20:10:00.000Z", "glucose": 157, "insulin_consumed": 0.8 },
+    { "timestamp": "2026-02-27T20:15:00.000Z", "glucose": 151, "insulin_consumed": 0.0 },
+    { "timestamp": "2026-02-27T20:20:00.000Z", "glucose": 147, "insulin_consumed": 0.0 },
+    { "timestamp": "2026-02-27T20:25:00.000Z", "glucose": 143, "insulin_consumed": 0.0 }
   ],
   "horizon_hours": 6,
   "step_minutes": 5,
@@ -91,6 +91,7 @@ Send the same JSON payload. The server emits:
 
 - Response includes:
   - `recommended_insulin` (optimal units from model sweep)
+  - `insulin_consumption_summary` (history total, recent 4h, estimated IOB)
   - `with_insulin_events` and `without_insulin_events`
 - If no trajectory checkpoint exists at `MODEL_CHECKPOINT`, backend uses a heuristic fallback and marks it in `model.notes`.
 - You can plug your trained trajectory checkpoint into `MODEL_CHECKPOINT` without changing frontend code.

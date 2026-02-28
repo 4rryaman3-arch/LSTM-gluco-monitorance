@@ -32,7 +32,7 @@ body {
 }
 
 .page {
-  max-width: 1160px;
+  max-width: 1360px;
   margin: 0 auto;
   padding: 28px 18px 34px;
 }
@@ -73,14 +73,14 @@ body {
 .grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: 360px 1fr;
+  grid-template-columns: 490px 1fr;
 }
 
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 18px;
-  padding: 16px;
+  padding: 20px;
   box-shadow: 0 7px 24px rgba(11, 58, 57, 0.06);
 }
 
@@ -251,19 +251,19 @@ body {
   border-radius: 12px;
   overflow: auto;
   margin-bottom: 10px;
-  max-height: 250px;
+  max-height: 360px;
 }
 
 .series-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 310px;
+  min-width: 430px;
 }
 
 .series-table th,
 .series-table td {
   border-bottom: 1px solid #ebf2ef;
-  padding: 8px;
+  padding: 10px;
 }
 
 .series-table th {
@@ -277,7 +277,17 @@ body {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 7px 8px;
+  padding: 9px 10px;
+  min-height: 40px;
+}
+
+.series-table td:nth-child(1) {
+  min-width: 210px;
+}
+
+.series-table td:nth-child(2),
+.series-table td:nth-child(3) {
+  min-width: 84px;
 }
 
 .mini-btn {

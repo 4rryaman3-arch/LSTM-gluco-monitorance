@@ -16,4 +16,5 @@ frontend/.env.local
 # local datasets and generated artifacts
 DiaData/datasets for T1D/
 DiaData/model_artifacts/
+DiaData/model_training/
 DiaData/.git_backup_*/

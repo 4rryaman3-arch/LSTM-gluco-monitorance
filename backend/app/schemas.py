@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field, model_validator
 class GlucoseHistoryPoint(BaseModel):
     timestamp: datetime
     glucose: float = Field(..., ge=40, le=500, description="mg/dL")
+    insulin_consumed: float = Field(
+        default=0.0, ge=0, le=50, description="Insulin consumed at this timestamp (units)."
+    )
 
 
 class ForecastRequest(BaseModel):
@@ -61,6 +64,12 @@ class InsulinRecommendation(BaseModel):
     note: str
 
 
+class InsulinConsumptionSummary(BaseModel):
+    total_history_units: float
+    recent_4h_units: float
+    estimated_iob_units: float
+
+
 class ForecastResponse(BaseModel):
     request_id: str
     input: ForecastRequest
@@ -69,4 +78,5 @@ class ForecastResponse(BaseModel):
     with_insulin_events: list[ForecastEvent]
     without_insulin_events: list[ForecastEvent]
     recommended_insulin: InsulinRecommendation
+    insulin_consumption_summary: InsulinConsumptionSummary
     model: ModelInfo
